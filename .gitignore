@@ -103,3 +103,6 @@ tests/*.pickle
 
 # macOS cruft
 .DS_Store
+
+# Claude
+docs/superpowers/
