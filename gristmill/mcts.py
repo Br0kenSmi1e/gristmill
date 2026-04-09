@@ -108,15 +108,34 @@ def _expand(node, drudge):
     return child
 
 
-def _rollout(state, greedy_constr_sum):
-    """Estimate reward as sum of biclique savings in pending sums."""
+def _saving_reward(saving):
+    """Scalar for backprop; consistent with former _rollout extraction."""
+    if hasattr(saving, 'coef'):
+        return float(saving.coef[-1])
+    return float(saving)
+
+
+def _rollout(state, drudge):
+    """Greedy rollout: repeat global best biclique per sum until none.
+
+    Uses the same loop as ``_Optimizer.constr_sum`` on deep copies so the
+    tree's ``state`` is not mutated.
+    """
+    with drudge.pickle_env():
+        pending_work = [
+            (copy.deepcopy(cg), terms, exts)
+            for cg, terms, exts in state.pending
+        ]
+
     total_saving = 0.0
-    for constr_graphs, terms, exts in state.pending:
-        for last_step_idxes, constr_graph in constr_graphs.items():
-            for biclique in _BronKerbosch(last_step_idxes, constr_graph):
-                if biclique.saving > 0:
-                    total_saving += float(biclique.saving.coef[-1])
-                    break
+    for constr_graphs, terms, exts in pending_work:
+        if_untouched = (1 << len(terms)) - 1
+        while True:
+            last_step_idxes, biclique = constr_graphs.get_opt_biclique()
+            if last_step_idxes is None:
+                break
+            total_saving += _saving_reward(biclique.saving)
+            if_untouched = constr_graphs.cleanup_constred(if_untouched, biclique)
     return total_saving
 
 
@@ -166,7 +185,7 @@ def mcts_constr_sum(opt, greedy_constr_sum, terms, exts,
         node = _select(root, ucb_c)
         if not _is_terminal(node.state):
             node = _expand(node, drudge)
-        reward = _rollout(node.state, greedy_constr_sum)
+        reward = _rollout(node.state, drudge)
         _backpropagate(node, reward)
 
     return _best_sequence(opt, root, list(terms), opt_snapshot, greedy_constr_sum)
