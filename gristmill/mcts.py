@@ -88,6 +88,9 @@ def _select(node, C):
     while not _is_terminal(node.state):
         if node.unexplored is None or len(node.unexplored) > 0:
             return node
+        # Fully expanded but no children: no biclique with saving > 0 (dead end).
+        if not node.children:
+            return node
         node = max(node.children, key=lambda c: _ucb1(c, node.visits, C))
     return node
 
