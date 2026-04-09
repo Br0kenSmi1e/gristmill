@@ -59,7 +59,7 @@ def _get_actions(state):
     return actions
 
 
-def _apply(state, action):
+def _apply(state, action, drudge):
     """Apply action to state without touching the optimizer.
 
     The optimizer state is only modified during rollout and best_sequence.
@@ -67,7 +67,10 @@ def _apply(state, action):
     """
     sum_idx, last_step_idxes, biclique = action
 
-    new_pending = [(copy.deepcopy(cg), list(t), e) for cg, t, e in state.pending]
+    # Constriction graphs hold drudge tensors; deepcopy unpickles them and needs
+    # Drudge.pickle_env() so Tensor.__setstate__ sees current_drudge.
+    with drudge.pickle_env():
+        new_pending = [(copy.deepcopy(cg), list(t), e) for cg, t, e in state.pending]
     constr_graphs = new_pending[sum_idx][0]
 
     new_if_untouched = constr_graphs.cleanup_constred(state.if_untouched, biclique)
@@ -89,13 +92,13 @@ def _select(node, C):
     return node
 
 
-def _expand(node):
+def _expand(node, drudge):
     if node.unexplored is None:
         node.unexplored = _get_actions(node.state)
     if not node.unexplored:
         return node
     action = node.unexplored.pop()
-    child_state = _apply(node.state, action)
+    child_state = _apply(node.state, action, drudge)
     child = _Node(child_state, parent=node)
     node.children.append(child)
     node.applied.append(action)
@@ -155,10 +158,11 @@ def mcts_constr_sum(opt, greedy_constr_sum, terms, exts,
     )
     root = _Node(initial_state, parent=None)
 
+    drudge = opt._drudge
     for _ in range(n_iterations):
         node = _select(root, ucb_c)
         if not _is_terminal(node.state):
-            node = _expand(node)
+            node = _expand(node, drudge)
         reward = _rollout(node.state, greedy_constr_sum)
         _backpropagate(node, reward)
 
