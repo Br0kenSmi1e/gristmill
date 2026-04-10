@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 import copy
-import functools
 from dataclasses import dataclass
 from math import sqrt, log, log1p
 from typing import Protocol, TypeVar, runtime_checkable
@@ -182,49 +181,54 @@ class ConstrictionProblem:
 # Integration with _Optimizer
 # ---------------------------------------------------------------------------
 
-def _snapshot(opt):
-    return (dict(opt._interms), dict(opt._interms_canon), opt._next_internal_idx)
+class _MCTSOptimizer(_Optimizer):
+    """_Optimizer subclass that uses MCTS for sum constriction."""
 
+    def __init__(self, *args, n_iterations, ucb_c=1.41, **kwargs):
+        super().__init__(*args, opt_sum=True, **kwargs)
+        self._n_iterations = n_iterations
+        self._ucb_c = ucb_c
 
-def _restore(opt, snapshot):
-    opt._interms, opt._interms_canon, opt._next_internal_idx = snapshot
+    def constr_sum(self, terms, exts):
+        constr_graphs = self._form_constr_graphs(terms, exts)
+        initial_state = _State(
+            pending=[(constr_graphs, list(terms), exts)],
+            if_untouched=(1 << len(terms)) - 1,
+        )
 
+        # Snapshot optimizer state before tree search.
+        snapshot = (
+            dict(self._interms), dict(self._interms_canon),
+            self._next_internal_idx,
+        )
 
-def _best_sequence(opt, root, original_terms, opt_snapshot, greedy_constr_sum):
-    """Walk most-visited path; replay actions on optimizer to get new_terms."""
-    node = root
-    while node.children:
-        node = max(node.children, key=lambda c: c.visits)
-    untouched_terms = [
-        v for i, v in enumerate(original_terms)
-        if node.state.if_untouched & (1 << i) != 0
-    ]
+        problem = ConstrictionProblem(self._drudge)
+        root = mcts_search(problem, initial_state,
+                           self._n_iterations, self._ucb_c)
 
-    _restore(opt, opt_snapshot)
-    opt.constr_sum = greedy_constr_sum
-    new_terms = []
-    cur = root
-    while cur.children:
-        idx = max(range(len(cur.children)), key=lambda i: cur.children[i].visits)
-        _, last_step_idxes, biclique = cur.applied[idx]
-        new_terms.append(opt._form_constred_term(last_step_idxes, biclique))
-        cur = cur.children[idx]
-    return new_terms, untouched_terms
+        # Walk most-visited path to find untouched terms.
+        node = root
+        while node.children:
+            node = max(node.children, key=lambda c: c.visits)
+        untouched_terms = [
+            v for i, v in enumerate(terms)
+            if node.state.if_untouched & (1 << i) != 0
+        ]
 
+        # Restore snapshot and replay best path on the real optimizer.
+        (self._interms, self._interms_canon,
+         self._next_internal_idx) = snapshot
+        new_terms = []
+        cur = root
+        while cur.children:
+            idx = max(range(len(cur.children)),
+                      key=lambda i: cur.children[i].visits)
+            _, last_step_idxes, biclique = cur.applied[idx]
+            new_terms.append(self._form_constred_term(
+                last_step_idxes, biclique))
+            cur = cur.children[idx]
 
-def mcts_constr_sum(opt, greedy_constr_sum, terms, exts,
-                    n_iterations, ucb_c, substs):
-    constr_graphs = opt._form_constr_graphs(terms, exts)
-    opt_snapshot = _snapshot(opt)
-    initial_state = _State(
-        pending=[(constr_graphs, list(terms), exts)],
-        if_untouched=(1 << len(terms)) - 1,
-    )
-
-    problem = ConstrictionProblem(opt._drudge)
-    root = mcts_search(problem, initial_state, n_iterations, ucb_c)
-
-    return _best_sequence(opt, root, list(terms), opt_snapshot, greedy_constr_sum)
+        return new_terms, untouched_terms
 
 
 def optimize_mcts(computs, n_iterations, substs=None, simplify=True,
@@ -245,20 +249,14 @@ def optimize_mcts(computs, n_iterations, substs=None, simplify=True,
     if not computs:
         raise ValueError('No computation is given!')
 
-    opt = _Optimizer(
+    opt = _MCTSOptimizer(
         computs, substs=substs, interm_fmt=interm_fmt,
-        contr_strat=contr_strat, opt_sum=False,
+        contr_strat=contr_strat,
         repeated_terms_strat=repeated_terms_strat,
         opt_symm=opt_symm, req_an_opt=False,
         greedy_cutoff=-1, drop_cutoff=-1, rand_constr=False,
         remove_shallow=True, stats=None,
+        n_iterations=n_iterations, ucb_c=ucb_c,
     )
-
-    greedy_constr_sum = opt.constr_sum
-    opt.constr_sum = functools.partial(
-        mcts_constr_sum, opt, greedy_constr_sum,
-        n_iterations=n_iterations, ucb_c=ucb_c, substs=substs
-    )
-    opt.opt_sum = True
 
     return opt.optimize()
