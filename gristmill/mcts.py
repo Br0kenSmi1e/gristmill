@@ -168,6 +168,8 @@ def _enumerate_bicliques(computs, substs, interm_fmt, contr_strat,
                     bicliques.append((
                         node, scalars, terms, constr_graphs, lsi, safe_bc,
                     ))
+        if bicliques:
+            break  # Leftmost derivation: focus on first open node.
     return opt, res_nodes, bicliques
 
 
