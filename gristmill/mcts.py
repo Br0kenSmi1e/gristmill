@@ -4,7 +4,7 @@ from __future__ import annotations
 import copy
 import functools
 from dataclasses import dataclass
-from math import sqrt, log
+from math import sqrt, log, log1p
 from typing import Protocol, TypeVar, runtime_checkable
 
 from .optimize import _Optimizer, _BronKerbosch
@@ -172,7 +172,7 @@ class ConstrictionProblem:
                 total_saving += _saving_reward(biclique.saving)
                 if_untouched = constr_graphs.cleanup_constred(
                     if_untouched, biclique)
-        return total_saving
+        return log1p(total_saving)
 
     def is_terminal(self, state):
         return len(state.pending) == 0
