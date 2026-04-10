@@ -1,12 +1,17 @@
 """MCTS-based tensor contraction sum optimizer."""
 
 from __future__ import annotations
-import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import sqrt, log, log1p
 from typing import Protocol, TypeVar, runtime_checkable
 
-from .optimize import _Optimizer, _BronKerbosch
+from drudge import TensorDef
+
+from .optimize import (
+    _Optimizer, _Sum, _BronKerbosch, _Biclique,
+    optimize, ContrStrat, RepeatedTermsStrat,
+)
+from .utils import get_flop_cost
 
 
 # ---------------------------------------------------------------------------
@@ -106,139 +111,190 @@ def mcts_search(problem, root_state, n_iterations, ucb_c=1.41):
 
 
 # ---------------------------------------------------------------------------
-# Domain: tensor constriction problem
+# Domain: tensor constriction problem (TensorDef-based state)
 # ---------------------------------------------------------------------------
 
+
 @dataclass
-class _State:
-    pending: list   # list of (constr_graphs, terms, exts)
-    if_untouched: int
+class _BiclqueInfo:
+    """Metadata about a discovered biclique, used as an action."""
+    index: int          # flat index in the enumeration (for re-derivation)
+    saving: float       # biclique saving (for display/debugging)
 
 
-def _saving_reward(saving):
-    """Scalar for backprop; consistent with former _rollout extraction."""
-    # if hasattr(saving, 'coef'):
-        # return float(saving.coef[-1])
-    return float(saving)
+def _make_optimizer(computs, substs, interm_fmt, contr_strat,
+                    repeated_terms_strat, opt_symm):
+    """Create an _Optimizer with opt_sum=False for single-step control."""
+    return _Optimizer(
+        computs, substs=substs, interm_fmt=interm_fmt,
+        contr_strat=contr_strat, opt_sum=False,
+        repeated_terms_strat=repeated_terms_strat,
+        opt_symm=opt_symm, req_an_opt=False,
+        greedy_cutoff=-1, drop_cutoff=-1,
+        rand_constr=False, remove_shallow=True, stats=None,
+    )
+
+
+def _enumerate_bicliques(computs, substs, interm_fmt, contr_strat,
+                         repeated_terms_strat, opt_symm):
+    """Create optimizer, form nodes, and enumerate all profitable bicliques.
+
+    Returns (opt, res_nodes, bicliques) where bicliques is a list of
+    (node, scalars, terms, constr_graphs, last_step_idxes, biclique).
+    """
+    opt = _make_optimizer(
+        computs, substs, interm_fmt, contr_strat,
+        repeated_terms_strat, opt_symm,
+    )
+    res_nodes = [opt._form_node(i) for i in opt._grist]
+
+    bicliques = []
+    for node in res_nodes:
+        if not isinstance(node, _Sum):
+            continue
+        scalars, terms, _ = opt._organize_sum_terms(node.sum_terms)
+        if len(terms) < 2:
+            continue
+        constr_graphs = opt._form_constr_graphs(terms, node.exts)
+        for lsi, constr_graph in constr_graphs.items():
+            for bc in _BronKerbosch(lsi, constr_graph):
+                if bc.saving > 0:
+                    safe_bc = _Biclique(
+                        parts=(list(bc.parts[0]), list(bc.parts[1])),
+                        leading_coeff=bc.leading_coeff,
+                        terms=bc.terms, saving=bc.saving,
+                        constr_graph=bc.constr_graph,
+                    )
+                    bicliques.append((
+                        node, scalars, terms, constr_graphs, lsi, safe_bc,
+                    ))
+    return opt, res_nodes, bicliques
+
+
+def _apply_biclique(opt, res_nodes, node, scalars, terms, constr_graphs,
+                    lsi, biclique):
+    """Apply one biclique and linearize back to list[TensorDef]."""
+    new_term = opt._form_constred_term(lsi, biclique)
+
+    if_untouched = (1 << len(terms)) - 1
+    if_untouched = constr_graphs.cleanup_constred(if_untouched, biclique)
+    untouched = [
+        v for i, v in enumerate(terms)
+        if if_untouched & (1 << i) != 0
+    ]
+    node.evals = [_Sum(
+        node.base, node.exts, scalars + untouched + [new_term],
+    )]
+
+    # Set pass-through evals for other sum nodes that weren't touched.
+    for n in res_nodes:
+        if isinstance(n, _Sum) and len(n.evals) == 0:
+            n.evals = [_Sum(n.base, n.exts, n.sum_terms)]
+
+    return opt._linearize(res_nodes)
 
 
 class ConstrictionProblem:
-    """MCTS problem adapter for tensor constriction optimization."""
+    """MCTS problem adapter for tensor constriction optimization.
 
-    def __init__(self, drudge):
-        self._drudge = drudge
+    State is a plain list[TensorDef]. Actions are biclique indices.
+    """
+
+    def __init__(self, substs, contr_strat, repeated_terms_strat, opt_symm):
+        self._substs = substs
+        self._contr_strat = contr_strat
+        self._repeated_terms_strat = repeated_terms_strat
+        self._opt_symm = opt_symm
+        self._step = 0
+
+    def _interm_fmt(self):
+        return 'tau_s{}^{{}}'.format(self._step)
+
+    def _enum(self, computs):
+        return _enumerate_bicliques(
+            computs, self._substs, self._interm_fmt(),
+            self._contr_strat, self._repeated_terms_strat, self._opt_symm,
+        )
 
     def get_actions(self, state):
-        actions = []
-        for i, (constr_graphs, terms, exts) in enumerate(state.pending):
-            for last_step_idxes, constr_graph in constr_graphs.items():
-                for biclique in _BronKerbosch(last_step_idxes, constr_graph):
-                    if biclique.saving > 0:
-                        safe = biclique._replace(
-                            parts=(list(biclique.parts[0]),
-                                   list(biclique.parts[1]))
-                        )
-                        actions.append((i, last_step_idxes, safe))
-        return actions
-
-    def apply(self, state, action):
-        sum_idx, last_step_idxes, biclique = action
-        with self._drudge.pickle_env():
-            new_pending = [
-                (copy.deepcopy(cg), list(t), e)
-                for cg, t, e in state.pending
-            ]
-        constr_graphs = new_pending[sum_idx][0]
-        new_if_untouched = constr_graphs.cleanup_constred(
-            state.if_untouched, biclique)
-        if not constr_graphs:
-            new_pending.pop(sum_idx)
-        return _State(pending=new_pending, if_untouched=new_if_untouched)
-
-    def rollout(self, state):
-        with self._drudge.pickle_env():
-            pending_work = [
-                (copy.deepcopy(cg), terms, exts)
-                for cg, terms, exts in state.pending
-            ]
-        total_saving = 0.0
-        for constr_graphs, terms, exts in pending_work:
-            if_untouched = (1 << len(terms)) - 1
-            while True:
-                last_step_idxes, biclique = constr_graphs.get_opt_biclique()
-                if last_step_idxes is None:
-                    break
-                total_saving += _saving_reward(biclique.saving)
-                if_untouched = constr_graphs.cleanup_constred(
-                    if_untouched, biclique)
-        return log1p(total_saving)
-
-    def is_terminal(self, state):
-        return len(state.pending) == 0
-
-
-# ---------------------------------------------------------------------------
-# Integration with _Optimizer
-# ---------------------------------------------------------------------------
-
-class _MCTSOptimizer(_Optimizer):
-    """_Optimizer subclass that uses MCTS for sum constriction."""
-
-    def __init__(self, *args, n_iterations, ucb_c=1.41, **kwargs):
-        super().__init__(*args, opt_sum=True, **kwargs)
-        self._n_iterations = n_iterations
-        self._ucb_c = ucb_c
-        self.search_tree = []
-
-    def constr_sum(self, terms, exts):
-        constr_graphs = self._form_constr_graphs(terms, exts)
-        initial_state = _State(
-            pending=[(constr_graphs, list(terms), exts)],
-            if_untouched=(1 << len(terms)) - 1,
-        )
-
-        # Snapshot optimizer state before tree search.
-        snapshot = (
-            dict(self._interms), dict(self._interms_canon),
-            self._next_internal_idx,
-        )
-
-        problem = ConstrictionProblem(self._drudge)
-        root = mcts_search(problem, initial_state,
-                           self._n_iterations, self._ucb_c)
-        self.search_tree.append(root)
-
-        # Walk most-visited path to find untouched terms.
-        node = root
-        while node.children:
-            node = max(node.children, key=lambda c: c.visits)
-        untouched_terms = [
-            v for i, v in enumerate(terms)
-            if node.state.if_untouched & (1 << i) != 0
+        _, _, bicliques = self._enum(state)
+        return [
+            _BiclqueInfo(index=i, saving=float(bc.saving))
+            for i, (_, _, _, _, _, bc) in enumerate(bicliques)
         ]
 
-        # Restore snapshot and replay best path on the real optimizer.
-        (self._interms, self._interms_canon,
-         self._next_internal_idx) = snapshot
-        new_terms = []
-        cur = root
-        while cur.children:
-            idx = max(range(len(cur.children)),
-                      key=lambda i: cur.children[i].visits)
-            _, last_step_idxes, biclique = cur.applied[idx]
-            new_terms.append(self._form_constred_term(
-                last_step_idxes, biclique))
-            cur = cur.children[idx]
+    def apply(self, state, action):
+        opt, res_nodes, bicliques = self._enum(state)
+        node, scalars, terms, cg, lsi, bc = bicliques[action.index]
+        result = _apply_biclique(opt, res_nodes, node, scalars, terms,
+                                 cg, lsi, bc)
+        self._step += 1
+        return result
 
-        return new_terms, untouched_terms
+    def rollout(self, state):
+        """Greedy rollout: run full optimize() and measure FLOP saving."""
+        try:
+            optimized = optimize(
+                state, substs=self._substs, simplify=False,
+                contr_strat=self._contr_strat,
+                repeated_terms_strat=self._repeated_terms_strat,
+                opt_symm=self._opt_symm,
+            )
+        except (ValueError, AssertionError):
+            return 0.0
+
+        current_cost = get_flop_cost(state)
+        optimized_cost = get_flop_cost(optimized)
+        saving = current_cost - optimized_cost
+        # Substitute to get a numeric value.
+        if self._substs:
+            saving = saving.subs(self._substs)
+        return log1p(max(0.0, float(saving)))
+
+    def is_terminal(self, state):
+        return len(self.get_actions(state)) == 0
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 
 def optimize_mcts(computs, n_iterations, substs=None, simplify=True,
                   interm_fmt='tau^{}', contr_strat=None, repeated_terms_strat=None,
                   opt_symm=True, ucb_c=1.41):
-    """Optimize tensor contractions using Monte Carlo Tree Search."""
-    from .optimize import ContrStrat, RepeatedTermsStrat
+    """Optimize tensor contractions using Monte Carlo Tree Search.
 
+    State is represented as list[TensorDef] throughout the search.
+    Each MCTS action applies one biclique factorization, producing a new
+    list of TensorDef (including intermediates).
+
+    Parameters
+    ----------
+    computs
+        The tensor computations to optimize.
+    n_iterations : int
+        Number of MCTS iterations.
+    substs : dict, optional
+        Substitutions for range sizes.
+    simplify : bool
+        Whether to simplify inputs.
+    interm_fmt : str
+        Format string for final intermediate names (applied at the end).
+    contr_strat : ContrStrat, optional
+        Contraction strategy (default TRAV).
+    repeated_terms_strat : RepeatedTermsStrat, optional
+        Strategy for repeated terms (default NATURAL).
+    opt_symm : bool
+        Whether to optimize common symmetrizations.
+    ucb_c : float
+        UCB1 exploration constant.
+
+    Returns
+    -------
+    tuple
+        (optimized_computs, search_tree_root)
+    """
     if contr_strat is None:
         contr_strat = ContrStrat.TRAV
     if repeated_terms_strat is None:
@@ -251,15 +307,18 @@ def optimize_mcts(computs, n_iterations, substs=None, simplify=True,
     if not computs:
         raise ValueError('No computation is given!')
 
-    opt = _MCTSOptimizer(
-        computs, substs=substs, interm_fmt=interm_fmt,
-        contr_strat=contr_strat,
-        repeated_terms_strat=repeated_terms_strat,
-        opt_symm=opt_symm, req_an_opt=False,
-        greedy_cutoff=-1, drop_cutoff=-1, rand_constr=False,
-        remove_shallow=True, stats=None,
-        n_iterations=n_iterations, ucb_c=ucb_c,
+    problem = ConstrictionProblem(
+        substs=substs, contr_strat=contr_strat,
+        repeated_terms_strat=repeated_terms_strat, opt_symm=opt_symm,
     )
+    initial_state = computs
 
-    res = opt.optimize()
-    return res, opt.search_tree
+    root = mcts_search(problem, initial_state, n_iterations, ucb_c)
+
+    # Walk the most-visited path to get the best final state.
+    node = root
+    while node.children:
+        node = max(node.children, key=lambda c: c.visits)
+
+    best_computs = node.state
+    return best_computs, root
