@@ -16,7 +16,7 @@ def three_ranges(spark_ctx):
     dr.set_dumms(Range('L', 0, l), symbols('p q r'))
     dr.add_resolver_for_dumms()
     dr.set_name(m, n, l)
-    dr.substs = {n: m * 2, l: m * 3}
+    dr.substs = {m: 10, n: 20, l: 30}
     return dr
 
 

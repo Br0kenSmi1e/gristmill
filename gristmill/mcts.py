@@ -117,8 +117,8 @@ class _State:
 
 def _saving_reward(saving):
     """Scalar for backprop; consistent with former _rollout extraction."""
-    if hasattr(saving, 'coef'):
-        return float(saving.coef[-1])
+    # if hasattr(saving, 'coef'):
+        # return float(saving.coef[-1])
     return float(saving)
 
 
