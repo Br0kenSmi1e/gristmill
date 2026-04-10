@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from math import sqrt, log, log1p
+from math import sqrt, log
 from typing import Protocol, TypeVar, runtime_checkable
 
 from drudge import TensorDef
@@ -51,6 +51,8 @@ class _Node:
 
 
 def _ucb1(node, parent_visits, C):
+    if node.visits == 0:
+        return float('inf')
     return node.avg_reward + C * sqrt(log(parent_visits) / node.visits)
 
 
@@ -234,7 +236,7 @@ class ConstrictionProblem:
         return result
 
     def rollout(self, state):
-        """Greedy rollout: run full optimize() and measure FLOP saving."""
+        """Greedy rollout: optimize and return -log(final FLOP cost)."""
         try:
             optimized = optimize(
                 state, substs=self._substs, simplify=False,
@@ -243,15 +245,15 @@ class ConstrictionProblem:
                 opt_symm=self._opt_symm,
             )
         except (ValueError, AssertionError):
-            return 0.0
+            optimized = state
 
-        current_cost = get_flop_cost(state)
-        optimized_cost = get_flop_cost(optimized)
-        saving = current_cost - optimized_cost
-        # Substitute to get a numeric value.
+        cost = get_flop_cost(optimized)
         if self._substs:
-            saving = saving.subs(self._substs)
-        return log1p(max(0.0, float(saving)))
+            cost = cost.subs(self._substs)
+        cost = float(cost)
+        if cost <= 0:
+            return float('-inf')
+        return -log(cost)
 
     def is_terminal(self, state):
         return len(self.get_actions(state)) == 0
