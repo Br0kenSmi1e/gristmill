@@ -118,10 +118,12 @@ def mcts_search(problem, root_state, n_iterations, ucb_c=1.41):
 
 
 @dataclass
-class _BiclqueInfo:
-    """Metadata about a discovered biclique, used as an action."""
-    index: int          # flat index in the enumeration (for re-derivation)
-    saving: float       # biclique saving (for display/debugging)
+class _Action:
+    """A biclique action storing everything needed for apply."""
+    last_step_idxes: object     # _LastStepIdxes
+    biclique: object            # _Biclique
+    saving: float
+    node_idx: int               # index of the sum node in res_nodes
 
 
 @dataclass
@@ -146,10 +148,12 @@ def _make_optimizer(computs, substs, interm_fmt, contr_strat,
 
 def _enumerate_bicliques(computs, substs, interm_fmt, contr_strat,
                          repeated_terms_strat, opt_symm):
-    """Create optimizer, form nodes, and enumerate all profitable bicliques.
+    """Create optimizer, form nodes, and enumerate profitable bicliques.
 
-    Returns (opt, res_nodes, bicliques) where bicliques is a list of
-    (node, scalars, terms, constr_graphs, last_step_idxes, biclique).
+    Uses leftmost derivation: only the first sum node with profitable
+    bicliques is considered.
+
+    Returns list of _Action.
     """
     opt = _make_optimizer(
         computs, substs, interm_fmt, contr_strat,
@@ -157,8 +161,8 @@ def _enumerate_bicliques(computs, substs, interm_fmt, contr_strat,
     )
     res_nodes = [opt._form_node(i) for i in opt._grist]
 
-    bicliques = []
-    for node in res_nodes:
+    actions = []
+    for node_idx, node in enumerate(res_nodes):
         if not isinstance(node, _Sum):
             continue
         scalars, terms, _ = opt._organize_sum_terms(node.sum_terms)
@@ -174,21 +178,41 @@ def _enumerate_bicliques(computs, substs, interm_fmt, contr_strat,
                         terms=bc.terms, saving=bc.saving,
                         constr_graph=bc.constr_graph,
                     )
-                    bicliques.append((
-                        node, scalars, terms, constr_graphs, lsi, safe_bc,
+                    actions.append(_Action(
+                        last_step_idxes=lsi,
+                        biclique=safe_bc,
+                        saving=float(bc.saving),
+                        node_idx=node_idx,
                     ))
-        if bicliques:
+        if actions:
             break  # Leftmost derivation: focus on first open node.
-    return opt, res_nodes, bicliques
+    return actions
 
 
-def _apply_biclique(opt, res_nodes, node, scalars, terms, constr_graphs,
-                    lsi, biclique):
-    """Apply one biclique and linearize back to list[TensorDef]."""
-    new_term = opt._form_constred_term(lsi, biclique)
+def _apply_biclique(action, computs, substs, interm_fmt, contr_strat,
+                    repeated_terms_strat, opt_symm):
+    """Apply one biclique action and linearize back to list[TensorDef].
+
+    Creates a fresh optimizer from computs (to populate _interms),
+    then uses the biclique stored in the action.
+    """
+    opt = _make_optimizer(
+        computs, substs, interm_fmt, contr_strat,
+        repeated_terms_strat, opt_symm,
+    )
+    res_nodes = [opt._form_node(i) for i in opt._grist]
+
+    # Find the matching sum node and set up its product intermediates.
+    node = res_nodes[action.node_idx]
+    assert isinstance(node, _Sum)
+    scalars, terms, _ = opt._organize_sum_terms(node.sum_terms)
+    constr_graphs = opt._form_constr_graphs(terms, node.exts)
+
+    # Apply the stored biclique on this fresh optimizer.
+    new_term = opt._form_constred_term(action.last_step_idxes, action.biclique)
 
     if_untouched = (1 << len(terms)) - 1
-    if_untouched = constr_graphs.cleanup_constred(if_untouched, biclique)
+    if_untouched = constr_graphs.cleanup_constred(if_untouched, action.biclique)
     untouched = [
         v for i, v in enumerate(terms)
         if if_untouched & (1 << i) != 0
@@ -217,27 +241,28 @@ class ConstrictionProblem:
         self._repeated_terms_strat = repeated_terms_strat
         self._opt_symm = opt_symm
 
+    def _opt_kwargs(self):
+        return dict(
+            substs=self._substs, contr_strat=self._contr_strat,
+            repeated_terms_strat=self._repeated_terms_strat,
+            opt_symm=self._opt_symm,
+        )
+
     def _interm_fmt(self, depth):
         return 'tau_s{}^{{}}'.format(depth)
 
-    def _enum(self, state):
+    def get_actions(self, state):
         return _enumerate_bicliques(
-            state.computs, self._substs, self._interm_fmt(state.depth),
-            self._contr_strat, self._repeated_terms_strat, self._opt_symm,
+            state.computs, interm_fmt=self._interm_fmt(state.depth),
+            **self._opt_kwargs(),
         )
 
-    def get_actions(self, state):
-        _, _, bicliques = self._enum(state)
-        return [
-            _BiclqueInfo(index=i, saving=float(bc.saving))
-            for i, (_, _, _, _, _, bc) in enumerate(bicliques)
-        ]
-
     def apply(self, state, action):
-        opt, res_nodes, bicliques = self._enum(state)
-        node, scalars, terms, cg, lsi, bc = bicliques[action.index]
-        result = _apply_biclique(opt, res_nodes, node, scalars, terms,
-                                 cg, lsi, bc)
+        result = _apply_biclique(
+            action, state.computs,
+            interm_fmt=self._interm_fmt(state.depth),
+            **self._opt_kwargs(),
+        )
         return _State(computs=result, depth=state.depth + 1)
 
     def rollout(self, state):
