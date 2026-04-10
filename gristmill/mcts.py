@@ -188,6 +188,7 @@ class _MCTSOptimizer(_Optimizer):
         super().__init__(*args, opt_sum=True, **kwargs)
         self._n_iterations = n_iterations
         self._ucb_c = ucb_c
+        self.search_tree = []
 
     def constr_sum(self, terms, exts):
         constr_graphs = self._form_constr_graphs(terms, exts)
@@ -205,6 +206,7 @@ class _MCTSOptimizer(_Optimizer):
         problem = ConstrictionProblem(self._drudge)
         root = mcts_search(problem, initial_state,
                            self._n_iterations, self._ucb_c)
+        self.search_tree.append(root)
 
         # Walk most-visited path to find untouched terms.
         node = root
@@ -259,4 +261,5 @@ def optimize_mcts(computs, n_iterations, substs=None, simplify=True,
         n_iterations=n_iterations, ucb_c=ucb_c,
     )
 
-    return opt.optimize()
+    res = opt.optimize()
+    return res, opt.search_tree

@@ -36,7 +36,7 @@ def test_mcts_shallow_correctness(three_ranges):
         4 * x[a, c] * u[c, b] + 2 * x[a, c] * v[c, b]
         - 2 * y[a, c] * u[c, b] - y[a, c] * v[c, b]
     )
-    res = optimize_mcts([target], n_iterations=20, substs=dr.substs)
+    res, _ = optimize_mcts([target], n_iterations=20, substs=dr.substs)
     assert verify_eval_seq(res, [target], simplify=False)
 
 
@@ -55,7 +55,7 @@ def test_mcts_deep_correctness(three_ranges):
         t[a, b],
         x[a, c] * u[c, d] * v[d, b] - 2 * y[a, c] * u[c, d] * v[d, b]
     )
-    res = optimize_mcts([target], n_iterations=20, substs=dr.substs)
+    res, _ = optimize_mcts([target], n_iterations=20, substs=dr.substs)
     assert verify_eval_seq(res, [target], simplify=True)
 
 
@@ -79,7 +79,7 @@ def test_mcts_cost_vs_greedy(three_ranges):
     substs = dr.substs
 
     greedy = optimize(targets, substs=substs)
-    mcts = optimize_mcts(targets, n_iterations=50, substs=substs)
+    mcts, _ = optimize_mcts(targets, n_iterations=50, substs=substs)
 
     greedy_cost = int(get_flop_cost(greedy).subs(substs).subs(p.m, 10))
     mcts_cost = int(get_flop_cost(mcts).subs(substs).subs(p.m, 10))
@@ -102,5 +102,5 @@ def test_mcts_single_iteration(three_ranges):
         4 * x[a, c] * u[c, b] + 2 * x[a, c] * v[c, b]
         - 2 * y[a, c] * u[c, b] - y[a, c] * v[c, b]
     )
-    res = optimize_mcts([target], n_iterations=1, substs=dr.substs)
+    res, _ = optimize_mcts([target], n_iterations=1, substs=dr.substs)
     assert verify_eval_seq(res, [target], simplify=False)
