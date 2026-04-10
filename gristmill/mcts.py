@@ -124,6 +124,13 @@ class _BiclqueInfo:
     saving: float       # biclique saving (for display/debugging)
 
 
+@dataclass
+class _State:
+    """MCTS state: tensor computations plus search depth."""
+    computs: list       # list[TensorDef]
+    depth: int = 0
+
+
 def _make_optimizer(computs, substs, interm_fmt, contr_strat,
                     repeated_terms_strat, opt_symm):
     """Create an _Optimizer with opt_sum=False for single-step control."""
@@ -201,7 +208,7 @@ def _apply_biclique(opt, res_nodes, node, scalars, terms, constr_graphs,
 class ConstrictionProblem:
     """MCTS problem adapter for tensor constriction optimization.
 
-    State is a plain list[TensorDef]. Actions are biclique indices.
+    State is _State(computs, depth). Actions are biclique indices.
     """
 
     def __init__(self, substs, contr_strat, repeated_terms_strat, opt_symm):
@@ -209,14 +216,13 @@ class ConstrictionProblem:
         self._contr_strat = contr_strat
         self._repeated_terms_strat = repeated_terms_strat
         self._opt_symm = opt_symm
-        self._step = 0
 
-    def _interm_fmt(self):
-        return 'tau_s{}^{{}}'.format(self._step)
+    def _interm_fmt(self, depth):
+        return 'tau_s{}^{{}}'.format(depth)
 
-    def _enum(self, computs):
+    def _enum(self, state):
         return _enumerate_bicliques(
-            computs, self._substs, self._interm_fmt(),
+            state.computs, self._substs, self._interm_fmt(state.depth),
             self._contr_strat, self._repeated_terms_strat, self._opt_symm,
         )
 
@@ -232,20 +238,19 @@ class ConstrictionProblem:
         node, scalars, terms, cg, lsi, bc = bicliques[action.index]
         result = _apply_biclique(opt, res_nodes, node, scalars, terms,
                                  cg, lsi, bc)
-        self._step += 1
-        return result
+        return _State(computs=result, depth=state.depth + 1)
 
     def rollout(self, state):
         """Greedy rollout: optimize and return -log(final FLOP cost)."""
         try:
             optimized = optimize(
-                state, substs=self._substs, simplify=False,
+                state.computs, substs=self._substs, simplify=False,
                 contr_strat=self._contr_strat,
                 repeated_terms_strat=self._repeated_terms_strat,
                 opt_symm=self._opt_symm,
             )
         except (ValueError, AssertionError):
-            optimized = state
+            optimized = state.computs
 
         cost = get_flop_cost(optimized)
         if self._substs:
@@ -315,7 +320,7 @@ def optimize_mcts(computs, n_iterations, substs=None, simplify=True,
         substs=substs, contr_strat=contr_strat,
         repeated_terms_strat=repeated_terms_strat, opt_symm=opt_symm,
     )
-    initial_state = computs
+    initial_state = _State(computs=computs)
 
     root = mcts_search(problem, initial_state, n_iterations, ucb_c)
 
@@ -324,5 +329,5 @@ def optimize_mcts(computs, n_iterations, substs=None, simplify=True,
     while node.children:
         node = max(node.children, key=lambda c: c.visits)
 
-    best_computs = node.state
+    best_computs = node.state.computs
     return best_computs, root
