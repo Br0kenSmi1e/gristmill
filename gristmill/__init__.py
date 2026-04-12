@@ -9,6 +9,7 @@ from .generate import (
 )
 from .optimize import optimize, verify_eval_seq, ContrStrat, RepeatedTermsStrat
 from .utils import get_flop_cost
+from .json_io import RustyMillConverter
 
 __version__ = '0.9.0'
 
@@ -24,5 +25,6 @@ __all__ = [
     'CPrinter',
     'FortranPrinter',
     'EinsumPrinter',
-    'OMEinsumPrinter'
+    'OMEinsumPrinter',
+    'RustyMillConverter',
 ]
