@@ -90,31 +90,44 @@ class RustyMillConverter:
             self._id_to_index[iid] = symbol
         return self._index_to_id[name]
 
-    def _get_symmetry_generators(self, base):
+    def _get_symmetry_generators(self, base, valence):
         """Get symmetry generators for a tensor base from drudge."""
+        ACTION_MAP = {
+            0: "Identity",
+            1: "Negate",
+            2: "Conjugate",
+            3: "NegateConjugate",
+        }
         generators = []
 
-        # Try looking up symmetry
         for key, group in self._symms.items():
             if group is None:
                 continue
-            # Match by base or (base, valence)
-            if key == base or (isinstance(key, tuple) and key[0] == base):
-                if hasattr(group, 'generators'):
-                    for gen in group.generators:
-                        perm = list(gen.perm) if hasattr(gen, 'perm') else list(gen)
-                        acc = gen.acc if hasattr(gen, 'acc') else 0
-                        action = {
-                            0: "Identity",
-                            1: "Negate",
-                            2: "Conjugate",
-                            3: "NegateConjugate",
-                        }.get(acc, "Identity")
-                        generators.append({
-                            "perm": perm,
-                            "action": action,
-                        })
-                break
+            # Match (base, valence) tuples or bare base
+            if isinstance(key, tuple):
+                if key[0] == base and key[1] == valence:
+                    pass  # matched
+                else:
+                    continue
+            else:
+                if key == base:
+                    pass  # matched
+                else:
+                    continue
+
+            # Extract generators from Schreier-Sims representation
+            # __getnewargs__() returns ([(base_point, [(perm_array, acc), ...]), ...],)
+            sgs_data = group.__getnewargs__()[0]
+            identity = list(range(valence))
+            for _base_point, transversal in sgs_data:
+                for perm_array, acc in transversal:
+                    if perm_array == identity and acc == 0:
+                        continue  # skip identity
+                    generators.append({
+                        "perm": perm_array,
+                        "action": ACTION_MAP.get(acc, "Identity"),
+                    })
+            break
 
         return generators
 
@@ -198,7 +211,7 @@ class RustyMillConverter:
             base = self._id_to_tensor[tid]
             # Determine slots from first usage (scan definitions)
             slots = self._infer_tensor_slots(tid, computs)
-            sym_gens = self._get_symmetry_generators(base)
+            sym_gens = self._get_symmetry_generators(base, len(slots))
             tensors_json.append({
                 "id": tid,
                 "slots": slots,
