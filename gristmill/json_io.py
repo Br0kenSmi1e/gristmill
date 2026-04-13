@@ -15,7 +15,7 @@ from sympy import (
     Mul, Number, Integer
 )
 
-from drudge import Term, Range
+from drudge import Term, Range, TensorDef, Tensor
 
 
 class RustyMillConverter:
@@ -25,8 +25,16 @@ class RustyMillConverter:
     The same instance must be used for both export and import.
     """
 
-    def __init__(self, drudge):
+    def __init__(self, drudge, substs=None):
+        """Initialize the converter.
+
+        Args:
+            drudge: The drudge instance.
+            substs: Optional dict mapping symbolic range sizes to concrete
+                integers, e.g. ``{nv: 100, no: 10}``.
+        """
         self.drudge = drudge
+        self._substs = substs or {}
 
         # Forward maps (name -> ID), built during export
         self._range_to_id = OrderedDict()   # Range.label -> int
@@ -56,7 +64,9 @@ class RustyMillConverter:
             self._range_to_id[label] = rid
             self._id_to_range[rid] = range_obj
             self._id_to_range_obj[rid] = range_obj
-            self._range_sizes[rid] = int(range_obj.size)
+            self._range_sizes[rid] = int(range_obj.size.subs(self._substs)
+                                         if hasattr(range_obj.size, 'subs')
+                                         else range_obj.size)
         return self._range_to_id[label]
 
     def _get_tensor_id(self, base):
@@ -383,8 +393,10 @@ class RustyMillConverter:
 
                 terms.append(Term(sums, amp, ()))
 
-            # Create TensorDef
-            tensor_def = self.drudge.define(base, *exts, terms=terms)
+            # Create TensorDef via Tensor from terms
+            rdd = self.drudge.ctx.parallelize(terms)
+            tensor = Tensor(self.drudge, rdd)
+            tensor_def = TensorDef(base, exts, tensor)
             results.append(tensor_def)
 
         return results
