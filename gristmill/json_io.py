@@ -38,7 +38,7 @@ class RustyMillConverter:
 
         # Forward maps (name -> ID), built during export
         self._range_to_id = OrderedDict()   # Range.label -> int
-        self._tensor_to_id = OrderedDict()  # str(base) -> int
+        self._tensor_to_id = OrderedDict()  # (str(base), rank) -> int
         self._index_to_id = OrderedDict()   # str(symbol) -> int
 
         # Reverse maps (ID -> object), built during export
@@ -69,17 +69,17 @@ class RustyMillConverter:
                                          else range_obj.size)
         return self._range_to_id[label]
 
-    def _get_tensor_id(self, base):
-        """Get or create a TensorId for a tensor base."""
-        name = str(base)
-        if name not in self._tensor_to_id:
+    def _get_tensor_id(self, base, rank):
+        """Get or create a TensorId for a tensor base with a given rank."""
+        key = (str(base), rank)
+        if key not in self._tensor_to_id:
             tid = len(self._tensor_to_id)
-            self._tensor_to_id[name] = tid
+            self._tensor_to_id[key] = tid
             if isinstance(base, IndexedBase):
                 self._id_to_tensor[tid] = base
             else:
-                self._id_to_tensor[tid] = IndexedBase(name)
-        return self._tensor_to_id[name]
+                self._id_to_tensor[tid] = IndexedBase(str(base))
+        return self._tensor_to_id[key]
 
     def _get_index_id(self, symbol):
         """Get or create an IndexId for an index symbol."""
@@ -177,13 +177,13 @@ class RustyMillConverter:
                 coeff, factors = self._extract_factors_and_coeff(term)
                 for base, indices in factors:
                     if base is not None:
-                        self._get_tensor_id(base)
+                        self._get_tensor_id(base, len(indices))
                         for idx in indices:
                             self._get_index_id(idx)
 
             # Output tensor
             base = comput.base
-            self._get_tensor_id(base)
+            self._get_tensor_id(base, len(comput.exts))
 
         # Build the JSON structure
         ranges_json = []
@@ -207,7 +207,7 @@ class RustyMillConverter:
 
         definitions_json = []
         for comput in computs:
-            base_tid = self._get_tensor_id(comput.base)
+            base_tid = self._get_tensor_id(comput.base, len(comput.exts))
 
             ext_indices = []
             for sym, rng in comput.exts:
@@ -241,7 +241,7 @@ class RustyMillConverter:
                 for base, indices in factors:
                     if base is not None:
                         factors_json.append({
-                            "tensor": self._get_tensor_id(base),
+                            "tensor": self._get_tensor_id(base, len(indices)),
                             "indices": [self._get_index_id(idx) for idx in indices],
                         })
 
@@ -267,16 +267,18 @@ class RustyMillConverter:
 
     def _infer_tensor_slots(self, tensor_id, computs):
         """Infer the range slots for a tensor from its usage in definitions."""
-        # Find the first usage of this tensor and extract range info
+        # Find the name and rank for this tensor ID
         name = None
-        for n, tid in self._tensor_to_id.items():
+        rank = None
+        for (n, r), tid in self._tensor_to_id.items():
             if tid == tensor_id:
                 name = n
+                rank = r
                 break
 
         # Check if it's used as a definition base
         for comput in computs:
-            if str(comput.base) == name:
+            if str(comput.base) == name and len(comput.exts) == rank:
                 return [self._get_range_id(rng)
                         for _, rng in comput.exts if rng is not None]
 
@@ -285,7 +287,7 @@ class RustyMillConverter:
             for term in comput.rhs_terms:
                 _, factors = self._extract_factors_and_coeff(term)
                 for base, indices in factors:
-                    if base is not None and str(base) == name:
+                    if base is not None and str(base) == name and len(indices) == rank:
                         # Map each index to its range
                         slots = []
                         dumm_ranges = dict(term.sums)
