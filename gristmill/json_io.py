@@ -369,11 +369,64 @@ class RustyMillConverter:
                             sym = Symbol(f"i_{iid}")
                             self._id_to_index[iid] = sym
 
+        # Build index-to-range mapping from all definitions
+        idx_to_range = {}
+        for def_data in data["definitions"]:
+            for idx_data in def_data["ext_indices"]:
+                idx_to_range[idx_data["id"]] = idx_data["range"]
+            for term_data in def_data["terms"]:
+                for idx_data in term_data["sum_indices"]:
+                    idx_to_range[idx_data["id"]] = idx_data["range"]
+
+        # Detect tensor IDs used as bases with multiple range signatures.
+        # Rustymill may reuse the same tensor ID for intermediates with
+        # different slot types (e.g., tau[a,i] with M×N and tau[b,p] with
+        # M×L).  We must give each variant a distinct IndexedBase.
+        base_sigs = {}  # tid -> list of range_sig tuples
+        for def_data in data["definitions"]:
+            tid = def_data["base"]
+            range_sig = tuple(
+                idx_data["range"] for idx_data in def_data["ext_indices"]
+            )
+            base_sigs.setdefault(tid, []).append(range_sig)
+
+        # For overloaded tensor IDs, create variant bases keyed by
+        # (tensor_id, range_sig).  The first occurrence keeps the original
+        # base; subsequent ones get a fresh name.
+        _variant_bases = {}  # (tid, range_sig) -> IndexedBase
+        for tid, sigs in base_sigs.items():
+            unique_sigs = list(dict.fromkeys(sigs))  # dedupe, keep order
+            if len(unique_sigs) <= 1:
+                continue
+            for i, sig in enumerate(unique_sigs):
+                if i == 0:
+                    _variant_bases[(tid, sig)] = self._id_to_tensor[tid]
+                else:
+                    name = f"tau_{self._next_interm_idx}"
+                    self._next_interm_idx += 1
+                    _variant_bases[(tid, sig)] = IndexedBase(name)
+
+        def _resolve_base(tid, range_sig):
+            """Return the correct IndexedBase for a (tid, range_sig) pair."""
+            key = (tid, range_sig)
+            if key in _variant_bases:
+                return _variant_bases[key]
+            return self._id_to_tensor[tid]
+
+        def _factor_range_sig(factor_data):
+            """Compute the range signature of a factor from its indices."""
+            return tuple(
+                idx_to_range[iid] for iid in factor_data["indices"]
+            )
+
         # Convert definitions
         results = []
         for def_data in data["definitions"]:
             base_tid = def_data["base"]
-            base = self._id_to_tensor[base_tid]
+            range_sig = tuple(
+                idx_data["range"] for idx_data in def_data["ext_indices"]
+            )
+            base = _resolve_base(base_tid, range_sig)
 
             # External indices
             exts = []
@@ -399,7 +452,9 @@ class RustyMillConverter:
                 # Factors — build amplitude as coeff * prod(Indexed(...))
                 amp = coeff
                 for factor_data in term_data["factors"]:
-                    tensor_base = self._id_to_tensor[factor_data["tensor"]]
+                    ftid = factor_data["tensor"]
+                    fsig = _factor_range_sig(factor_data)
+                    tensor_base = _resolve_base(ftid, fsig)
                     indices = tuple(
                         self._id_to_index[iid]
                         for iid in factor_data["indices"]
