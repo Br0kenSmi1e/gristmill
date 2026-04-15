@@ -207,14 +207,11 @@ class RustyMillConverter:
             })
 
         tensors_json = []
-        for name, tid in self._tensor_to_id.items():
+        for (name, rank), tid in self._tensor_to_id.items():
             base = self._id_to_tensor[tid]
-            # Determine slots from first usage (scan definitions)
-            slots = self._infer_tensor_slots(tid, computs)
-            sym_gens = self._get_symmetry_generators(base, len(slots))
+            sym_gens = self._get_symmetry_generators(base, rank)
             tensors_json.append({
                 "id": tid,
-                "slots": slots,
                 "symmetry": sym_gens,
             })
 
@@ -277,44 +274,6 @@ class RustyMillConverter:
         }
 
         return json.dumps(result, indent=2)
-
-    def _infer_tensor_slots(self, tensor_id, computs):
-        """Infer the range slots for a tensor from its usage in definitions."""
-        # Find the name and rank for this tensor ID
-        name = None
-        rank = None
-        for (n, r), tid in self._tensor_to_id.items():
-            if tid == tensor_id:
-                name = n
-                rank = r
-                break
-
-        # Check if it's used as a definition base
-        for comput in computs:
-            if str(comput.base) == name and len(comput.exts) == rank:
-                return [self._get_range_id(rng)
-                        for _, rng in comput.exts if rng is not None]
-
-        # Check if it's used as a factor in some term
-        for comput in computs:
-            for term in comput.rhs_terms:
-                _, factors = self._extract_factors_and_coeff(term)
-                for base, indices in factors:
-                    if base is not None and str(base) == name and len(indices) == rank:
-                        # Map each index to its range
-                        slots = []
-                        dumm_ranges = dict(term.sums)
-                        ext_ranges = dict(comput.exts)
-                        for idx in indices:
-                            if idx in dumm_ranges:
-                                slots.append(self._get_range_id(dumm_ranges[idx]))
-                            elif idx in ext_ranges and ext_ranges[idx] is not None:
-                                slots.append(self._get_range_id(ext_ranges[idx]))
-                            else:
-                                slots.append(0)  # fallback
-                        return slots
-
-        return []  # Unknown
 
     def import_json(self, json_str):
         """Convert rustymill JSON back to a list of gristmill TensorDefs.
